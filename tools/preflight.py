@@ -35,8 +35,9 @@ def remote(ctx, code, sudo=False, python=None):
     return output
 
 
-def require_paths(ctx, directories=(), files=(), commands=(), sudo=False):
-    payload = json.dumps(dict(directories=list(directories), files=list(files), commands=list(commands)))
+def require_paths(ctx, directories=(), files=(), commands=(), sudo=False, writable_files=()):
+    payload = json.dumps(dict(directories=list(directories), files=list(files),
+                              commands=list(commands), writable_files=list(writable_files)))
     remote(ctx, r'''import os, shutil
 p = %s
 for path in p['directories']:
@@ -45,6 +46,9 @@ for path in p['directories']:
 for path in p['files']:
     if not os.path.isfile(path) or not os.access(path, os.R_OK):
         raise SystemExit('missing or unreadable file: ' + path)
+for path in p['writable_files']:
+    if not os.path.isfile(path) or not os.access(path, os.R_OK | os.W_OK):
+        raise SystemExit('missing or inaccessible file (read/write required): ' + path)
 for command in p['commands']:
     if not shutil.which(command):
         raise SystemExit('required command not found: ' + command)
@@ -53,6 +57,16 @@ for command in p['commands']:
 
 def local_python(path):
     ast.parse(Path(path).read_text(), filename=str(path))
+
+
+def validate_klipper(ctx, texts):
+    try:
+        from validate_klipper_config import validate_sources
+    except ImportError as error:
+        raise ctx.DeployError('Klipper config validation requires jinja2. Add --with jinja2 to the uv run command.') from error
+    errors = validate_sources(texts)
+    if errors:
+        raise ctx.DeployError('Klipper config validation failed:\n' + '\n'.join(map(str, errors)))
 
 
 def config_plan(ctx):
@@ -112,12 +126,16 @@ def config_plan(ctx):
     # A partial macro-only install must not introduce references to an unloaded extra.
     if 'printer.wmp_recovery' in active and not re.search(r'^\s*\[wmp_recovery\]', active, re.M):
         raise ctx.DeployError('Configuration lacks [wmp_recovery], required by these macros. Include printer.cfg in the update.')
+    if '_WMP_CASE_LIGHT_' in active and not re.search(r'^\s*\[wmp_case_light\]', active, re.M):
+        raise ctx.DeployError('Configuration lacks [wmp_case_light], required by the light macros. Include case_light.cfg in the update.')
+    validate_klipper(ctx, texts)
     return texts, active
 
 
 def config(ctx):
     texts, active = config_plan(ctx)
     needs_recovery = bool(re.search(r'^\s*\[wmp_recovery\]', active, re.M))
+    needs_light = bool(re.search(r'^\s*\[wmp_case_light\]', active, re.M))
     if ctx.config_only:
         # HTTP cannot inspect Klipper source files. Require the running API contract.
         if needs_recovery:
@@ -125,6 +143,11 @@ def config(ctx):
             status = result.get('wmp_recovery', {})
             if not {'z_reference_valid', 'homing'} <= status.keys():
                 raise ctx.DeployError('--config-only requires a loaded wmp_recovery helper. Run tools/deploy.py install config with SSH first.')
+        if needs_light:
+            result = json.loads(ctx.moonraker('/printer/objects/query?wmp_case_light'))['result']['status']
+            light = result.get('wmp_case_light', {})
+            if light.get('policy_version') != 2:
+                raise ctx.DeployError('--config-only requires a loaded wmp_case_light helper. Run tools/deploy.py install config with SSH first.')
         if '[collision_detect]' in active:
             # The vendor detector has no get_status(), so Moonraker does not
             # include it in /printer/objects/list. Use the loaded config instead.
@@ -135,15 +158,28 @@ def config(ctx):
         return
     ctx.ssh()
     ctx.sftp()
-    extra = ROOT / 'klipper_extras/wmp_recovery.py'
-    local_python(extra)
+    extras = [ROOT / 'klipper_extras/wmp_recovery.py']
+    if needs_light:
+        extras.append(ROOT / 'klipper_extras/wmp_case_light.py')
+    for extra in extras:
+        local_python(extra)
     home = '/home/' + ctx.user
     required = ['collision_detect.py', 'tools_calibrate_core.py'] if '[collision_detect]' in active else []
+    required_files = [home + '/klipper/klippy/extras/' + n for n in required]
+    if needs_light:
+        required_files += [home + '/printer_data/config/tmt1.ini',
+                           '/sys/class/backlight/backlight/brightness',
+                           '/sys/class/gpio/gpio76/value']
+        if 'preload' not in getattr(ctx, 'installing_components', set()):
+            required_files.append(home + '/wmp/lib/libwmp_case-light.so')
     require_paths(ctx, directories=[home + '/klipper/klippy/extras', home + '/printer_data/config'],
-                  files=[home + '/klipper/klippy/extras/' + n for n in required], commands=['python3'])
+                  files=required_files, commands=['python3'],
+                  writable_files=['/sys/class/gpio/gpio76/value']
+                  if needs_light and 'preload' not in getattr(ctx, 'installing_components', set()) else [])
     # Parse with the printer's Python and Jinja, without loading modules or moving hardware.
     remote(ctx, r'''import ast, jinja2, re
-ast.parse(%r)
+for source in %r:
+    ast.parse(source)
 env = jinja2.Environment('{%%', '%%}', '{', '}')
 for name, text in %r.items():
     for section in re.split(r'(?m)^\[', text)[1:]:
@@ -151,7 +187,7 @@ for name, text in %r.items():
         match = re.search(r'(?m)^gcode\s*[:=]\s*\n([\s\S]*)', body)
         if match:
             env.parse('\n'.join(line.split('#', 1)[0] for line in match[1].splitlines()))
-''' % (extra.read_text(), texts), python=home + '/klippy-env/bin/python')
+''' % ([extra.read_text() for extra in extras], texts), python=home + '/klippy-env/bin/python')
 
 
 def material(ctx):
@@ -159,6 +195,8 @@ def material(ctx):
     ctx.sftp()
     home = '/home/' + ctx.user
     local_python(ROOT / 'klipper_extras/wm_material.py')
+    validate_klipper(ctx, {str(ROOT / 'klipper_extras/wm_material.cfg'):
+                           (ROOT / 'klipper_extras/wm_material.cfg').read_text()})
     configparser.RawConfigParser(strict=False).read_string((ROOT / 'klipper_extras/wm_material.cfg').read_text())
     require_paths(ctx, directories=[home + '/klipper/klippy/extras', home + '/printer_data/config'], commands=['python3'])
     remote(ctx, 'import ast; ast.parse(%r)' % (ROOT / 'klipper_extras/wm_material.py').read_text(),

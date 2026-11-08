@@ -14,7 +14,7 @@ This loading mechanism is called `LD_PRELOAD`.
 | Patch | Supported System versions |
 |---|---|
 | `wifi-fix` | 1.1.04, 1.1.08, 1.1.12, 1.1.13 |
-| `fan-fix`, `recovery-fix`, `openace-compat`, `head-config-guard` | 1.1.08, 1.1.12, 1.1.13 |
+| `fan-fix`, `recovery-fix`, `openace-compat`, `head-config-guard`, `case-light` | 1.1.08, 1.1.12, 1.1.13 |
 
 Each patch checks the executable and the instructions it will replace. Unknown or
 unexpectedly modified clients are skipped. A library appearing in the process's
@@ -54,6 +54,7 @@ Logs and optional disable switches:
 
 | Patch | Log | Environment variable |
 |---|---|---|
+| Case light | `/tmp/wmp_case-light.log` | `WMP_CASE_LIGHT_DISABLE` |
 | Wi-Fi | `/tmp/wmp_wififix.log` | `WMP_WIFIFIX_DISABLE` |
 | Fan | `/tmp/wmp_fanfix.log` | `WMP_FANFIX_DISABLE` |
 | Recovery | `/tmp/wmp_recoveryfix.log` | `WMP_RECOVERYFIX_DISABLE` |
@@ -62,6 +63,25 @@ Logs and optional disable switches:
 Setting a disable variable in the screen service's environment takes effect on its
 next restart. The code checks whether the variable exists, so remove it to re-enable
 the patch; setting it to `0` still disables it.
+
+## Case-light preference
+
+The case-light bridge forwards explicit screen light clicks to Klipper's
+`wmp_case_light/set` endpoint through local Moonraker so a G-code wait cannot
+delay the preference. It falls back to `SET_PIN PIN=case_light VALUE=0|1` if
+the endpoint is unavailable. The matching `wmp_case_light.py`
+helper persists the preference through Klipper's `SAVE_VARIABLE` API and applies
+the screen/print lighting policy. The bridge itself never edits settings files.
+The LED button reads the saved preference, so automatic screen sleep does not
+make it appear switched Off. Before enabling the backlight, the bridge notifies
+Klipper to apply that preference immediately. These requests have a short timeout;
+the screen can still wake when the backend is unavailable.
+The native setters still run for GPIO initialization and manual fallback.
+A permission monitor delegates only GPIO76's value file to the stock Klipper
+user, so the unprivileged helper can drive the light after export/reboot.
+Unknown client fingerprints or changed hook code prevent patch installation.
+Install `config preload` together and check the case-light log for the current
+screen process. See [case-light behavior](../config/README.md#case-light-preference-screen-sleep-and-printing).
 
 ## Wi-Fi reconnection
 

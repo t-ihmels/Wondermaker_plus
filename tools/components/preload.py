@@ -107,6 +107,7 @@ def status(ctx):
                     (shq(pid), shq(pid)), sudo=True, stream=False)
     print("Loaded libraries: %s" % (out.strip().replace("\n", " ") or "none"))
     for label, path in (("head-config-guard", "/tmp/wmp_head-config-guard.log"),
+                        ("case-light", "/tmp/wmp_case-light.log"),
                         ("wifi-fix", "/tmp/wmp_wififix.log"),
                         ("fan-fix", "/tmp/wmp_fanfix.log"),
                         ("recovery-fix", "/tmp/wmp_recoveryfix.log"),

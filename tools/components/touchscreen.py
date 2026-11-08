@@ -22,8 +22,12 @@ def shq(s):
 def run(c, cmd, sudo=False, stream=True):
     if sudo:
         password = PASS or require("WMP_PASS")
-        cmd = "echo %s | sudo -S bash -c %s" % (password, shq(cmd))
-    _, out, err = c.exec_command(cmd, timeout=300, get_pty=False)
+        cmd = "sudo -S -p '' -- bash -c %s" % shq(cmd)
+    stdin, out, err = c.exec_command(cmd, timeout=300, get_pty=False)
+    if sudo:
+        stdin.write(password + '\n')
+        stdin.flush()
+        stdin.channel.shutdown_write()
     body = ""
     for line in iter(out.readline, ""):
         body += line

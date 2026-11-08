@@ -12,7 +12,7 @@ import preflight
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def config_context(files, targets=(), config_only=False, objects=(), recovery=None, collision=False):
+def config_context(files, targets=(), config_only=False, objects=(), recovery=None, collision=False, light=None):
     def api(path):
         if path.startswith('/server/files/list'):
             return json.dumps({'result': [{'path': name} for name in files]})
@@ -22,6 +22,8 @@ def config_context(files, targets=(), config_only=False, objects=(), recovery=No
             return json.dumps({'result': {'objects': objects}})
         if path == '/printer/objects/query?configfile':
             return json.dumps({'result': {'status': {'configfile': {'settings': {'collision_detect': {}} if collision else {}}}}})
+        if path == '/printer/objects/query?wmp_case_light':
+            return json.dumps({'result': {'status': {'wmp_case_light': light or {}}}})
         if path.startswith('/printer/objects/query'):
             return json.dumps({'result': {'status': {'wmp_recovery': recovery or {}}}})
         raise AssertionError(path)
@@ -41,6 +43,15 @@ def test_partial_macro_update_requires_recovery_section(monkeypatch, tmp_path):
     ctx = config_context({'printer.cfg': '[include macros.cfg]\n', 'macros.cfg': ''}, ['macros.cfg'])
     with pytest.raises(deploy.DeployError, match='lacks.*wmp_recovery'):
         preflight.config_plan(ctx)
+
+
+@pytest.mark.parametrize('config_only', [False, True])
+def test_invalid_message_blocks_config_before_upload(monkeypatch, tmp_path, config_only):
+    local_config(monkeypatch, tmp_path, {'printer.cfg': '[include macros.cfg]\n',
+        'macros.cfg': '[gcode_macro CHECK]\ngcode:\n    RESPOND MSG="finished; pausing"\n'})
+    ctx = config_context({}, config_only=config_only)
+    with pytest.raises(deploy.DeployError, match='gcode-arguments'):
+        preflight.config(ctx)
 
 
 def test_missing_include_blocks_before_install(monkeypatch, tmp_path):
@@ -71,6 +82,38 @@ def test_http_config_only_requires_running_extra(monkeypatch, tmp_path):
         preflight.config(ctx)
     ctx = config_context({}, config_only=True, recovery={'z_reference_valid': False, 'homing': False})
     preflight.config(ctx)
+
+
+def test_http_light_install_requires_loaded_helper(monkeypatch, tmp_path):
+    local_config(monkeypatch, tmp_path, {'printer.cfg': '[wmp_case_light]\n'})
+    with pytest.raises(deploy.DeployError, match='loaded wmp_case_light'):
+        preflight.config(config_context({}, config_only=True))
+    with pytest.raises(deploy.DeployError, match='loaded wmp_case_light'):
+        preflight.config(config_context({}, config_only=True,
+                                       light={'value': 1, 'available': True}))
+    # Availability and loading are distinct; the screen may initialize later.
+    preflight.config(config_context({}, config_only=True,
+                                    light={'value': None, 'available': False, 'policy_version': 2}))
+
+
+def test_partial_light_macros_require_active_helper(monkeypatch, tmp_path):
+    local_config(monkeypatch, tmp_path, {'macros.cfg':
+        '[gcode_macro CASE_LIGHT_TOGGLE]\ngcode:\n    _WMP_CASE_LIGHT_TOGGLE\n'})
+    ctx = config_context({'printer.cfg': '[include macros.cfg]\n', 'macros.cfg': ''}, ['macros.cfg'])
+    with pytest.raises(deploy.DeployError, match='lacks.*wmp_case_light'):
+        preflight.config_plan(ctx)
+
+
+def test_light_preflight_checks_gpio_access_without_changing_it(monkeypatch):
+    paths, scripts = [], []
+    monkeypatch.setattr(preflight, 'config_plan', lambda ctx: (
+        {'printer.cfg': '[wmp_case_light]\n'}, '[wmp_case_light]\n'))
+    monkeypatch.setattr(preflight, 'require_paths', lambda ctx, **kw: paths.append(kw))
+    monkeypatch.setattr(preflight, 'remote', lambda ctx, code, **kw: scripts.append(code))
+    ctx = NS(config_only=False, user='test', ssh=lambda: None, sftp=lambda: None)
+    preflight.config(ctx)
+    assert paths[0]['writable_files'] == ['/sys/class/gpio/gpio76/value']
+    assert 'CaseLight' in scripts[0]  # remote syntax-check covers the helper too
 
 
 def test_http_config_requires_collision_module_before_upload(monkeypatch, tmp_path):

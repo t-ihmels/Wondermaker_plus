@@ -20,6 +20,7 @@ and paramiko. Restart checks still need Moonraker.
 """
 import argparse, datetime, difflib, fnmatch, io, json, os, sys, time, urllib.error, urllib.request
 import uuid as uuidlib
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools'))
 from local_env import configure_ssh_client, require  # noqa: E402
@@ -48,6 +49,29 @@ def excluded(name):
 def body_of(data):
     """Everything above the SAVE_CONFIG marker."""
     return data.split(SAVE_CONFIG_MARKER)[0]
+
+
+def validate_push(targets):
+    """Keep the direct transfer route from bypassing static syntax checks."""
+    try:
+        from validate_klipper_config import validate_sources
+    except ImportError:
+        sys.exit('Config validation requires jinja2; add --with jinja2 to uv run.')
+    sources = {}
+    for name in targets:
+        if name.endswith('.cfg'):
+            data = Path(os.path.join(LIVE, name)).read_bytes()
+            if name == 'printer.cfg':
+                data = body_of(data)
+            try:
+                sources[name] = data.decode('utf-8')
+            except UnicodeError as error:
+                sys.exit('%s: invalid UTF-8: %s' % (name, error))
+    # Partial pushes can reference fragments already on the printer. Full
+    # prospective include validation belongs to tools/deploy.py preflight.
+    errors = validate_sources(sources, check_includes=False)
+    if errors:
+        sys.exit('Klipper config validation failed:\n' + '\n'.join(map(str, errors)))
 
 
 # ---------------------------------------------------------------- transports
@@ -300,6 +324,7 @@ def run(t, args):
     if not targets:
         print("nothing to push; config/live matches the printer")
         return
+    validate_push(targets)
     if printing_now():
         sys.exit("A print is running. Finish or cancel it before uploading configuration.")
     print("Files to upload:", ", ".join(targets))

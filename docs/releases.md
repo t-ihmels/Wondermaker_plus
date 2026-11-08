@@ -142,3 +142,46 @@ This performs config preflight, keeps the recovery helper current, backs up the
 replaced macro file, and restarts Klipper. First-time users on vendor firmware
 1.1.13 can follow the README for a full installation from this tag. Users on
 vendor firmware 1.1.12 should keep using `fw-1.1.12-r1`.
+
+## fw-1.1.13-r3 — case-light preference and print cleanup
+
+Targets **vendor System 1.1.13**.
+
+- Adds a saved case-light preference shared by the stock screen and G-code.
+  Use `SET_PIN PIN=case_light VALUE=0|1` or the `CASE_LIGHT_ON`,
+  `CASE_LIGHT_OFF` and `CASE_LIGHT_TOGGLE` macros in Fluidd. When enabled,
+  the light follows screen activity, stays on during printing and pauses, and
+  uses the screen-sleep delay after a print ends. Wake applies the preference
+  before enabling the backlight; the screen button displays the preference.
+- Fixes semicolons in all four extruder runout-delay messages.
+- Shares the bounded bed-clearance and nozzle-wipe sequence between print end
+  and cancel, preserving the configurable drop and limiting it to available
+  travel. Adapted from [t-ihmels' contribution](https://github.com/t-ihmels/Wondermaker_plus).
+- Lets completed SD jobs reach EOF and clears native pause flags on cancel.
+- Validates Klipper configuration, Jinja templates and quoted command syntax
+  before deployment and in CI. Also fixes the fan-test counter assignment.
+- Rewrites the README around the fixes and enhancements over stock firmware.
+
+Install both the updated configuration/helper and screen bridge while idle:
+
+```bash
+git fetch origin --tags
+git switch --detach fw-1.1.13-r3
+uv run --with paramiko --with jinja2 python tools/deploy.py install config preload --preflight-only
+uv run --with paramiko --with jinja2 python tools/deploy.py install config preload
+uv run --with paramiko python tools/deploy.py status
+```
+
+The matching helper and bridge are required for the new light behavior;
+`--config-only` does not install them. First-time installations can follow the
+README to install all components.
+
+Validation: 304 tests passed locally, with 33 skipped because their optional
+fixtures or tools were unavailable. Printer checks on 1.1.13 covered screen and
+G-code choices, preference persistence, sleep/wake behavior, active/paused
+lighting, print-end/cancel cleanup, replacement of the post-print timer, and
+expiry after the configured delay. The screen could change the preference during
+a G-code dwell. Wake applied the light with the backlight still off, and the
+screen button retained the preference while the physical light slept. These
+checks used jobs without heating or motion; physical clearance/wipe moves,
+runout and calibration were not exercised.

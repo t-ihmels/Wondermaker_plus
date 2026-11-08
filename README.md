@@ -1,172 +1,128 @@
 # Wondermaker+
 
-Wondermaker+ (WM+) adds printer fixes, better tool changes, and remote touchscreen
-control to the Wondermaker U1 / ZR Ultra (`TM-T1`). You can install its components
-separately.
+Wondermaker+ (WM+) adds fixes and features to the Wondermaker U1 / ZR Ultra
+(`TM-T1`). It runs alongside the stock firmware and keeps your printer's saved
+calibration and hardware identifiers.
 
-The current configuration requires **Wondermaker System 1.1.13**. Local tests
-cover this release. The configuration and existing patches were installed on
-2026-10-10 and verified with Klipper Ready and four heads; printing and calibration
-acceptance remain pending. Earlier releases completed two-color prints and
-power-loss recovery tests.
-See the [1.1.13 notes](docs/firmware-1.1.13.md) for the changes and remaining checks.
+## What WM+ changes
 
-## What you can install
+### Fixes to stock behavior
 
-| Component | What it does | Installation needs |
-|---|---|---|
-| `config` | Improves startup, tool changes, filament handling, and recovery; preserves your printer's calibration | SSH login; later config-only updates can use HTTP |
-| `touchscreen` | Shows the printer's screen in Fluidd and lets you click it | SSH login with sudo |
-| `material` | Reads the screen's material settings to choose a filament-unload sequence | SSH login |
-| `preload` | Fixes touchscreen Wi-Fi, fan requests, recovery, and openACE compatibility; blocks destructive head resets after communication faults | SSH login with sudo |
+- **Tool changes:** returns the new head to the saved print position after wiping,
+  with a clearance lift. Restores the slicer's travel speed so later moves do not
+  crawl at the wipe speed.
+- **Pause and resume:** preserves the slicer-to-head mapping and restores nozzle
+  temperatures to the correct physical heads. Parks farther from the front limit.
+- **Print completion and cancellation:** lets SD prints reach EOF cleanly and
+  clears native pause flags after cancellation, so the next print can start.
+- **Duplicate filament loading:** removes the insertion sensor's extra load/purge
+  sequence. Filament is loaded when you press **Load** on the screen.
+- **Wi-Fi reconnection:** keeps retrying temporary connection failures instead of
+  giving up. Wrong-password handling remains intact.
+- **Filter-fan control:** stops repeated automatic On requests from overriding
+  manual fan choices during a print.
+- **Head-configuration loss:** blocks the screen app from erasing head identities
+  and reducing the printer to one head after a communication timeout. Klipper
+  stays stopped until the underlying fault is resolved.
+- **Power-loss recovery:** restores the print's mesh, probing head and tool mapping;
+  corrects saved coordinates so mesh/tool offsets are not applied twice; establishes
+  Z at the bottom before tool pickup.
 
-SSH is the printer's remote shell connection. Sudo allows changes to system files.
-Moonraker is the printer's HTTP API; Fluidd is its browser interface. The commands
-below run on your computer, using `uv` to provide Python dependencies.
+### Enhancements
 
-## Connect to your printer
+- **Touchscreen in Fluidd:** view the physical screen live and send taps/swipes
+  from your browser. Keeps timelapses pointed at the print camera.
+- **Case-light control:** a saved On/Off preference shared by the screen, Fluidd
+  and G-code. When enabled, the light stays on while the screen is awake, during
+  printing/pauses, and for the screen-sleep delay after a print ends.
+- **Print startup:** probes with the first printing head by default, avoiding
+  unnecessary T0 changes. Purges along the plate's left edge, away from the front
+  panel.
+- **Filament unloading:** shapes the tip using material-specific temperatures and
+  pull sequences to reduce blobs and strings. The optional material helper reads
+  the screen's material settings.
+- **Faster wiping:** adjustable wipe speed, defaulting to 200 mm/s versus the
+  stock 50 mm/s.
+- **Print end and cancel:** lowers the bed by up to 50 mm, limited by remaining
+  travel, and wipes the nozzle.
+- **Motion defaults:** caps acceleration at 5,000 mm/s² versus stock 20,000, and
+  adds clearance for idle tool changes, filament service and calibration.
+- **Vibration tools:** measure belt balance and resonance, compare input shapers,
+  and verify the results during movement.
 
-Copy [.env.example](.env.example) to `.env` and fill in:
+See the [configuration guide](config/README.md),
+[screen-patch guide](client-preload/README.md), and
+[vibration-tool guide](utils/README.md) for settings and implementation details.
 
-- `WMP_PRINTER`: printer address or hostname, without `http://`.
-- `WMP_USER`: SSH username.
-- `WMP_PASS`: SSH password.
+## Compatibility
 
-Git ignores `.env`. Values you export in your shell override the file.
-SSH checks the printer's host key against your known-hosts file. Verify the
-printer's key before adding it. `WMP_SSH_AUTO_ADD=1` accepts the first key offered
-by that address; use it only if that is how you want to establish trust.
-
-List components or compare your printer's configuration with the repository:
-
-```bash
-uv run python tools/deploy.py list
-uv run python tools/deploy.py status config --diff
-```
+**Requires vendor System 1.1.13.** See the
+[firmware notes](docs/firmware-1.1.13.md) and
+[release instructions](docs/releases.md) for firmware compatibility and older versions.
 
 ## Install or update
 
-Install **vendor firmware 1.1.13 first**. WM+ does not install vendor firmware.
-Use the published `fw-1.1.13-r2` tag for this firmware; `fw-1.1.12-r1` remains
-available for vendor firmware 1.1.12.
-After a firmware update, reapply WM+ configuration and touchscreen patches
-before printing.
+Run these commands **on your computer**, from this checkout, with
+[uv installed](https://docs.astral.sh/uv/getting-started/installation/).
 
-If a print is waiting for power-loss recovery, read the
-[recovery upgrade limits](client-preload/README.md#upgrading-with-an-interrupted-print)
-before updating. An older checkpoint may lack the information needed to resume.
+Copy [.env.example](.env.example) to `.env` and set:
 
-Run installation checks without replacing installed files or restarting services:
+- `WMP_PRINTER`: printer hostname or IP, without `http://`.
+- `WMP_USER`: printer SSH username.
+- `WMP_PASS`: printer SSH password.
 
-```bash
-uv run --with paramiko python tools/deploy.py install all --preflight-only
-```
+Git ignores `.env`; exported environment values override it. SSH uses your
+known-hosts file. The example explains the optional first-connection trust setting.
 
-Then install all components, or choose the ones you need:
+While the printer is idle, check prerequisites, install, then check status:
 
 ```bash
-uv run --with paramiko python tools/deploy.py install all
-uv run --with paramiko python tools/deploy.py install config preload
-uv run --with paramiko python tools/deploy.py install touchscreen
-uv run --with paramiko python tools/deploy.py install material
-```
-
-Each installation checks every selected component before applying changes. Checks
-cover access permissions, required files, configuration syntax, the web server,
-and whether the touchscreen patches support the installed client. They use
-temporary files on the printer for compilation and web-server checks.
-
-A failed check stops installation before any component is installed. If a failure
-occurs during installation, earlier changes may already be applied; they are not
-automatically undone. The tool also refuses changes during a running or paused
-print, or when it cannot determine the printer's state.
-
-Klipper restarts once after the selected components finish when needed. Use
-`--no-restart` to defer that restart. Touchscreen components still restart their
-own services during installation.
-
-For later configuration updates, you can use HTTP without SSH:
-
-```bash
-uv run python tools/deploy.py install config --config-only
-uv run python tools/deploy.py install config --config-only --files macros.cfg
-```
-
-This requires the matching `wmp_recovery.py` helper to be installed already.
-Run the full `install config` again whenever that helper changes or a firmware
-update removes it. The HTTP check confirms the helper's expected status fields;
-it cannot inspect the installed Python source.
-
-Check installation or remove an optional component:
-
-```bash
+uv run --with paramiko --with jinja2 python tools/deploy.py install all --preflight-only
+uv run --with paramiko --with jinja2 python tools/deploy.py install all
 uv run --with paramiko python tools/deploy.py status
-uv run --with paramiko python tools/deploy.py uninstall touchscreen
 ```
 
-Configuration has no automatic uninstall. See the
-[configuration guide](config/README.md) before restoring a vendor baseline.
+All selected components must pass preflight before installation starts. The config
+component backs up files it replaces and preserves printer-owned identifiers,
+calibration and settings. A later installation failure can leave earlier changes applied.
+Installation refuses running or paused prints. Screen-service restarts can also
+restart Klipper; `--no-restart` does not prevent those service restarts.
 
-## Printer improvements
+Choose components instead of `all` if needed:
 
-The [configuration guide](config/README.md) explains each change and its settings.
-The main improvements are:
+| Component | Provides |
+|---|---|
+| `config` | Printer macros, recovery helper and light controller |
+| `preload` | Screen-app fixes, head-configuration protection and light-click integration |
+| `material` | Screen material settings for the unload macros |
+| `touchscreen` | Interactive Fluidd screen panel and timelapse-camera selection |
 
-- **Print startup:** purge along the plate's left edge and, by default, probe with
-  the first tool that will print. This can avoid extra tool changes.
-- **Tool changes:** wipe the new nozzle, return to the print position with a
-  clearance lift, and preserve the slicer's travel speed.
-- **Pause and resume:** preserve the mapping between slicer tools and physical
-  heads, including intentional remapping while paused.
-- **Filament handling:** shape the filament tip during unload, move clear of the
-  bed for loading, and avoid the screen's duplicate load/purge sequence.
-- **Print end:** lower the bed by up to 50 mm and wipe the nozzle.
-- **Power-loss recovery:** establish Z at the bottom before pickup, restore the
-  print's bed mesh and tool mapping, and save coordinates without applying mesh
-  and tool corrections twice. Requires both `config` and `preload`.
+Install `config preload` together for the core features. `material` and
+`touchscreen` are optional. Full installation needs SSH; `preload` and
+`touchscreen` also need sudo. Reapply WM+ after vendor firmware updates.
 
-Recovery still uses the vendor's return path with only 3 mm above the saved Z.
-It can hit taller objects along that path. Checkpoints also retain the vendor's
-sampling and selection limits. Read the [recovery guide](docs/print-mesh-recovery.md)
-before relying on recovery for a particular print.
-
-## Touchscreen and calibration tools
-
-The [touchscreen guide](docs/touchscreen.md) covers the clickable panel in Fluidd.
-The [touchscreen patch guide](client-preload/README.md) explains the Wi-Fi, fan,
-recovery, and openACE fixes. These patches change the running process; they leave
-the vendor executable on disk unchanged.
-
-The [resonance tools](utils/README.md) measure vibration, compare belt responses,
-and help choose input-shaper settings to reduce ringing. They save measurements
-and graphs so you can compare changes. Your own calibration stays on your printer.
-
-The [OrcaSlicer guide](docs/orca-print-dialog-integration.md) explains the print-start
-bed-leveling and timelapse options. The [documentation index](docs/README.md) also
-links firmware comparisons, test records, and earlier design decisions.
-
-## Local validation
+For later config-only updates, with matching helpers already installed:
 
 ```bash
+uv run --with jinja2 python tools/deploy.py install config --config-only
+```
+
+Use full installation when a helper changes. See the
+[configuration guide](config/README.md#install-and-compare) for partial updates,
+backups and restoring stock configuration, and the
+[touchscreen guide](docs/touchscreen.md) for opening or removing the Fluidd panel.
+
+## Development checks
+
+```bash
+uv run --with jinja2 python tools/validate_klipper_config.py
 uv run --with pytest --with jinja2 --with unicorn python -m pytest -q tests
 ```
 
-Tests cover macro sequences, recovery checks, configuration migration, and
-compiled touchscreen patches. Some checks require extracted vendor files in
-ignored `analysis/` directories and skip when those files are absent. Local tests
-do not measure physical clearance, heating, or stopping performance.
-
-## Repository layout
-
-| Path | Contents |
-|---|---|
-| `config/` | Current WM+ configuration, vendor baselines, and configuration guide |
-| `device/`, `scripts/` | Touchscreen bridge and printer-side installation scripts |
-| `tools/` | Installation, comparison, and remote-control tools |
-| `utils/` | Resonance measurements and configuration transfers |
-| `client-preload/`, `klipper_extras/` | Touchscreen patches and Klipper extensions |
-| `tests/`, `docs/` | Local checks, guides, and investigation records |
-| `analysis/` | Local firmware extracts and evidence; ignored by Git |
+Some tests require local vendor extracts and skip when those files are absent.
+Static validation cannot prove runtime-generated values or physical motion safe.
+See [validation scope](config/README.md#configuration-validation) and the
+[documentation index](docs/README.md) for the detailed guides and test records.
 
 ## License and disclaimer
 
@@ -178,10 +134,3 @@ relicense that material.
 
 Read [DISCLAIMER.md](DISCLAIMER.md) for warranty, safety, affiliation, and
 third-party-material notices.
-
-## Firmware release tags
-
-Use a firmware-specific tag for repeatable installation: `fw-<version>-r<revision>`.
-The first 1.1.12 hotfix is **`fw-1.1.12-r1`**. Its complete configuration targets
-System 1.1.12; later firmware configurations will have their own tags. See
-[release compatibility and upgrade commands](docs/releases.md).

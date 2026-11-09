@@ -132,6 +132,10 @@ class RecoveryModel:
                 tool = int(args['T']) if command == '_CHANGE_TOOL' else self.sv['box_modify_t' + command[1:]]
                 self.sv['current_extruder'] = tool
                 self.events.append(('PHYSICAL_TOOL', {'tool': tool, 'reference': self.sv['probe_tool']}))
+            elif command in ('_WMP_CASE_LIGHT_PRINT_START', '_WMP_CASE_LIGHT_PRINT_END'):
+                # Python light/timer endpoints are covered in test_case_light;
+                # they do not change this model's motion or recovery state.
+                pass
             elif command in ('Z_HOMING', 'Z_RISE', '_RAISE_Z', '_DESCEND_Z', '_OFFSET_SET', 'BED_MESH_PROFILE', 'M24') or command.startswith('_WMP_'):
                 self.run(command, **args)
             # Other commands perform hardware work outside this model.

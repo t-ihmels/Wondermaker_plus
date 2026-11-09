@@ -15,30 +15,67 @@ Set connection details using the [project README](../README.md), then run:
 
 ```bash
 uv run python tools/deploy.py status config --diff
-uv run --with paramiko python tools/deploy.py install config --preflight-only
-uv run --with paramiko python tools/deploy.py install config
+uv run --with paramiko --with jinja2 python tools/deploy.py install config preload --preflight-only
+uv run --with paramiko --with jinja2 python tools/deploy.py install config preload
 ```
 
-Full installation copies the required `klipper_extras/wmp_recovery.py` helper
-into Klipper's extras directory, backs up and uploads changed configuration,
-and restarts Klipper. The helper establishes Z at the bottom before unreferenced
-tool pickup. `printer.cfg` requires it to load.
+Full installation copies the required `klipper_extras/wmp_recovery.py` and
+`klipper_extras/wmp_case_light.py` helpers into Klipper's extras directory, backs
+up and uploads changed configuration, and restarts Klipper. The recovery helper
+establishes Z at the bottom before unreferenced tool pickup; the light helper
+exposes the stock case light to G-code.
 
-For later updates, HTTP is enough if the matching helper is already installed:
+For later updates, HTTP is enough if the matching helpers are already installed:
 
 ```bash
-uv run python tools/deploy.py install config --config-only
-uv run python tools/deploy.py install config --config-only --files macros.cfg
+uv run --with jinja2 python tools/deploy.py install config --config-only
+uv run --with jinja2 python tools/deploy.py install config --config-only --files macros.cfg
 ```
 
-Use full installation again when the helper changes or vendor firmware removes
-it. HTTP checks the running helper's expected status fields but cannot compare
-its source. Add `--no-restart` to defer loading the uploaded configuration.
+Use full installation again when a helper changes or vendor firmware removes
+it. HTTP checks the running helpers' expected status fields but cannot compare
+their source. Add `--no-restart` to defer loading the uploaded configuration.
 Installation refuses changes during running or paused prints or when the printer's
 state cannot be established. A failure during upload may leave some changes applied.
 
 Power-loss recovery also requires the `preload` component. Before updating an
 interrupted print, read the [checkpoint upgrade limits](../client-preload/README.md#upgrading-with-an-interrupted-print).
+
+## Configuration validation
+
+Before proposing configuration changes, run:
+
+```bash
+uv run --with jinja2 python tools/validate_klipper_config.py
+```
+
+The default audit covers every Klipper `.cfg` in `config/live/` and
+`klipper_extras/`, including macros in filament sensors, buttons, idle handlers,
+and other `*_gcode` options. To validate a different config tree, pass its path;
+include all referenced fragments. Historical `config/stock*` snapshots are
+preserved unchanged and can be checked explicitly. Moonraker/crowsnest `.conf`
+files use different schemas and are outside this Klipper validator's scope.
+
+Checks cover config-file syntax, Jinja syntax, macro-variable Python literals,
+include resolution/cycles, literal extended-command arguments and quotes,
+UTF-8/hidden control characters, and suspicious Unicode punctuation in command
+syntax. Diagnostics include the file, line, section, and error type; a failed
+audit returns nonzero. Valid G-code comments and direct Jinja response messages
+can contain semicolons. Quoted extended-command arguments cannot safely contain
+`#`, `*`, or `;`: Klipper truncates at those characters before parsing quotes.
+Use commas/ordinary words in `RESPOND MSG` strings instead.
+
+The same checks run on the prospective configuration during full and HTTP-only
+deployment preflight, before any helper/config upload. Direct `config_sync.py push`
+also validates selected files before backing up or uploading them. The material
+component's optional Klipper config is also checked. Deployment needs local `jinja2`;
+add `--with jinja2` to `uv run`. The GitHub `Validate Klipper configs` workflow
+runs the audit and its regression tests for pull requests and pushes to `main`.
+Make that check required in branch protection if it should block merging.
+
+This is static validation: it does not execute macros, connect to printer hardware,
+validate every third-party option or MCU pin, or prove arbitrary runtime values
+are safe. Normal Klipper startup validation and motion/heating tests still apply.
 
 ## What stays on your printer
 
@@ -153,7 +190,7 @@ length accounted for that observation.
 Install `material` to read the screen's slot materials:
 
 ```bash
-uv run --with paramiko python tools/deploy.py install material
+uv run --with paramiko --with jinja2 python tools/deploy.py install material
 ```
 
 `WM_MATERIAL_STATUS` reports them. Without that helper, unload guesses from the
@@ -175,15 +212,109 @@ It turns assist off after the last pull, before cooling: an ACE 2 was observed
 to error about one second after pulling stopped while assist remained active.
 The hooks do nothing outside an openACE unload.
 
+### Case light preference, screen sleep, and printing
+
+The saved preference uses Klipper's `SAVE_VARIABLE` mechanism, under
+`wmp_case_light_enabled` in the existing managed variables file. There are no
+manual edits to that file or to the stock `tmt1.ini`. Screen settings are read
+from `tmt1.ini` only. Moonraker's database is not required.
+
+Use these commands from Fluidd or print G-code to change the saved preference:
+
+```gcode
+SET_PIN PIN=case_light VALUE=1
+SET_PIN PIN=case_light VALUE=0
+CASE_LIGHT_TOGGLE
+```
+
+`CASE_LIGHT_ON` and `CASE_LIGHT_OFF` are also available in Fluidd's macro panel.
+On means illumination is allowed when needed; Off keeps the light off regardless
+of print/screen state. Toggle changes the **saved preference**, even when an On
+preference currently has the physical light off. The stock circuit is digital;
+fractional values are rejected. The commands follow Klipper's
+[SET_PIN format](https://www.klipper3d.org/G-Codes.html#output_pin).
+
+With the preference On, the physical light stays on whenever:
+
+- A print is active, including paused prints.
+- The last print finished less than one screen-sleep delay ago.
+- The physical screen backlight is on.
+
+Otherwise it turns off. Waking the screen turns it on again; automatic changes
+never overwrite the preference. `START_PRINT` honors the preference and clears
+old print grace. `PRINT_END` and `CANCEL_PRINT` start a fresh grace interval after
+cleanup. The controller also observes actual print-state transitions, including
+errors and jobs started outside these macros. A new print cancels previous grace.
+
+The grace interval uses the current `[screen] screen_off_delay` from the stock
+`tmt1.ini`, stored in **milliseconds** (`300000` = 5 minutes). It follows changes
+made through the stock Screen Sleep setting. Screen blanking may be disabled;
+as long as the backlight stays on, the On preference keeps the light on.
+
+Install both components for screen choices and G-code to share the preference:
+
+```bash
+uv run --with paramiko --with jinja2 python tools/deploy.py install config preload --preflight-only
+uv run --with paramiko --with jinja2 python tools/deploy.py install config preload
+```
+
+The `case-light` screen bridge forwards explicit stock light clicks to
+`POST /printer/wmp_case_light/set` through local Moonraker, using the same saved
+preference implementation as `SET_PIN`. This bypasses the G-code queue so Off
+can take effect during long heater/dwell waits. The bridge falls back to
+`SET_PIN` when the direct endpoint is unavailable and preserves the vendor GPIO
+setter for initialization/manual fallback.
+The screen button displays the saved preference rather than the physical GPIO,
+so it stays On during automatic screen sleep. The bridge notifies Klipper before
+enabling the backlight, turning on the case light without waiting for the next
+poll. Wake never changes the saved preference; Off still wins. These requests
+use local Moonraker and fall back to normal screen wake if the backend is down.
+This records Off even when the GPIO was already off automatically. The bridge
+checks the complete stock executable and all hooked functions before patching;
+unknown or modified clients are skipped. Check `status preload` and the current
+process log at `/tmp/wmp_case-light.log` after installation. Merely loading a
+library does not prove its hooks applied. The preference survives Klipper restart;
+post-print grace does not. First installation adopts the existing light state.
+
+The helper uses host GPIO76 rather than an MCU pin; do not add an
+`[output_pin case_light]` section. It polls the preference, print state and screen
+at 0.5-second intervals. Its `wmp_case_light` status reports `enabled` (preference),
+`value` (physical output), `available`, `print_active`, `policy_version`, and
+`last_error`. Missing/invalid state prevents automatic writes and is logged
+without aborting print startup or cleanup. Manual command failures are reported
+as command errors. The helper never exports or resets GPIOs. The root-owned stock screen bridge
+delegates ownership of only `/sys/class/gpio/gpio76/value` to the stock Klipper
+user (`t13dp`) and restores that permission if the GPIO is re-exported. Direction,
+export control, and other GPIOs remain untouched.
+
+Stock 1.1.13 binary inspection identifies GPIO2_B4 at
+`/sys/class/gpio/gpio76/value`, active high. The home-page light callback uses
+`set_GPIO2_B4_high` / `set_GPIO2_B4_low`. `update_common_status` reads the GPIO
+every 50 updates, changes `led_on`, and refreshes the icon, so the icon should
+follow physical illumination on its next poll.
+
+On 2026-11-08, printer checks verified screen/G-code preference changes,
+persistence across Klipper restart, screen-off/wake behavior, active and paused
+print state, timer replacement by a new print, and actual shutoff after 300.2
+seconds with the GUI set to five minutes. A screen Off click saved within 0.904
+seconds during a 30-second G-code dwell. The original 30-minute sleep setting was
+then restored through the GUI. Light-only SD jobs also verified `PRINT_END` reaches
+EOF and cancellation clears native pause state. Axes stayed unhomed, positions
+unchanged, and heater targets zero. The stock unhomed guard refused pause parking;
+physical parking, clearance, wipe, and filament-runout acceptance remain pending.
+
 ### Startup, print end, and cooling
 
 The startup purge runs on the plate's left edge at X0, Y100–150. The previous
 front-edge position could strike the front panel. The earlier Y2 workaround is
 superseded by this left-edge route.
 
-At print end, `PRINT_END.variable_bed_drop` defaults to lowering the bed by up to
-50 mm, limited by the bottom endstop. It wipes only while X, Y, and Z remain homed,
-then leaves the head over the left brush.
+At print end or cancellation, `PRINT_END.variable_bed_drop` defaults to lowering
+the bed by up to 50 mm, limited by the bottom endstop. Both paths use the shared
+`_WMP_PRINT_END_CLEARANCE_AND_WIPE` helper, which accounts for G-code offsets and
+skips the Z move when no downward travel remains. It wipes only while X, Y, and Z
+remain homed, then leaves the head over the left brush. `PRINT_END` leaves its SD reader to
+reach EOF; cancellation resets the file and explicitly clears native pause flags.
 
 Final cooldowns in `NOZZLE_PREPARE` and `POP` wait only until temperature falls
 below their upper limits (102.5°C and 104.5°C). An undershoot does not require
@@ -221,8 +352,8 @@ modules or run the deploy tool's full installation checks:
 uv run python utils/config_sync.py diff
 uv run python utils/config_sync.py diff --patch
 uv run python utils/config_sync.py pull /tmp/printer-config
-uv run python utils/config_sync.py push
-uv run python utils/config_sync.py push macros.cfg
+uv run --with jinja2 python utils/config_sync.py push
+uv run --with jinja2 python utils/config_sync.py push macros.cfg
 ```
 
 Push backs up replaced files as `<name>.wmp-backup-<timestamp>`, uploads changes,
@@ -233,7 +364,7 @@ stronger paused-print and uncertain-state checks.
 If Moonraker is unavailable, SFTP can transfer files:
 
 ```bash
-uv run --with paramiko python utils/config_sync.py --ssh push --no-restart
+uv run --with paramiko --with jinja2 python utils/config_sync.py --ssh push --no-restart
 ```
 
 Put `--ssh` before the subcommand. Restart and readiness checks still need

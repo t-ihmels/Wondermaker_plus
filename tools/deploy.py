@@ -1,23 +1,24 @@
 """Install, remove, or check Wondermaker+ components.
 
 Components:
-    config       Printer configuration and required recovery helper.
+    config       Printer configuration and required recovery/light helpers.
     touchscreen  Clickable printer screen in Fluidd.
     material     Material settings for filament unloading.
-    preload      Wi-Fi, fan, recovery, openACE, and head-configuration protection.
+    preload      Wi-Fi, fan, recovery, openACE, head protection, and light preference.
 
 Examples (run on your computer):
     uv run python tools/deploy.py list
     uv run python tools/deploy.py status config --diff
-    uv run --with paramiko python tools/deploy.py install all --preflight-only
-    uv run --with paramiko python tools/deploy.py install config preload
-    uv run python tools/deploy.py install config --config-only
+    uv run --with paramiko --with jinja2 python tools/deploy.py install all --preflight-only
+    uv run --with paramiko --with jinja2 python tools/deploy.py install config preload
+    uv run --with jinja2 python tools/deploy.py install config --config-only
     uv run --with paramiko python tools/deploy.py uninstall touchscreen
 
 Set WMP_PRINTER, WMP_USER, and WMP_PASS in .env or your environment.
 Full installation uses SSH; touchscreen and preload also need sudo.
-Config-only updates use HTTP and require the matching wmp_recovery.py
-helper to be installed already. See config/README.md.
+Config-only updates use HTTP and require the matching recovery/light helpers
+to be installed already. Config/material validation requires jinja2 locally.
+See config/README.md.
 
 Installation checks all selected components first. A running or paused
 print blocks changes. Earlier applied changes are not undone if a later
@@ -147,7 +148,7 @@ def main():
     ap.add_argument("--files", nargs="*", default=[], help="install config: upload only the named configuration files")
     ap.add_argument("--config-only", action="store_true",
                     help="install config via Moonraker HTTP only; requires the matching "
-                         "wmp_recovery.py helper to be installed already")
+                         "recovery/light helpers to be installed already")
     ap.add_argument("--diff", action="store_true",
                     help="status config: show changed lines as well as filenames")
     ap.add_argument("--preflight-only", action="store_true",
@@ -171,6 +172,7 @@ def main():
 
     ctx = Context(args)
     comps = resolve(args.components)
+    ctx.installing_components = {component.NAME for component in comps} if args.action == 'install' else set()
     rc = 0
     try:
         try:

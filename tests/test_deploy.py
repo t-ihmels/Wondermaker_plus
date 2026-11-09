@@ -35,6 +35,50 @@ def test_http_only_update_never_opens_ssh(monkeypatch):
                       {'WMP_PRINTER': 'printer.example'})]
 
 
+def test_config_installs_both_helpers_with_backups_and_idempotence(tmp_path):
+    from types import SimpleNamespace
+    extras = tmp_path / 'home/test/klipper/klippy/extras'
+    extras.mkdir(parents=True)
+    old = extras / 'wmp_case_light.py'
+    old.write_bytes(b'previous light helper')
+    renames = []
+    def mapped(path):
+        return tmp_path / path.lstrip('/')
+    def rename(source, destination):
+        renames.append(destination)
+        mapped(source).replace(mapped(destination))
+    sftp = SimpleNamespace(open=lambda path, mode: mapped(path).open(mode),
+                           posix_rename=rename)
+    ctx = SimpleNamespace(user='test', sftp=lambda: sftp)
+    config._install_extra(ctx)
+    for name in ('wmp_recovery.py', 'wmp_case_light.py'):
+        assert (extras / name).read_bytes() == (Path(config.ROOT) / 'klipper_extras' / name).read_bytes()
+    backups = list(extras.glob('wmp_case_light.py.wmp-backup-*'))
+    assert len(backups) == 1 and backups[0].read_bytes() == b'previous light helper'
+    assert not list(extras.glob('*.wmp-upload-*'))
+    assert len(renames) == 2
+    config._install_extra(ctx)
+    assert len(renames) == 2
+
+
+def test_sudo_password_uses_stdin_without_shell_interpolation(monkeypatch):
+    import io
+    from types import SimpleNamespace as NS
+    from components import touchscreen
+    password = "test '$dollar; characters"
+    monkeypatch.setattr(touchscreen, 'PASS', password)
+    stdin, stdout = io.StringIO(), io.StringIO('done\n')
+    stdin.channel = NS(shutdown_write=lambda: None)
+    stdout.channel = NS(recv_exit_status=lambda: 0)
+    commands = []
+    def execute(command, **kwargs):
+        commands.append(command)
+        return stdin, stdout, io.BytesIO()
+    assert touchscreen.run(NS(exec_command=execute), 'true', sudo=True, stream=False) == ('done\n', '', 0)
+    assert password not in commands[0]
+    assert stdin.getvalue() == password + '\n'
+
+
 @pytest.mark.parametrize('config_only', [False, True])
 def test_install_order_restart_and_push_failure(monkeypatch, config_only):
     monkeypatch.setattr(sys, 'argv', ['deploy.py', 'install', 'config'] +

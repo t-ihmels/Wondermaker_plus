@@ -9,6 +9,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize('slot', range(4))
+def test_runout_delay_message_survives_gcode_comment_parsing(slot):
+    source = (ROOT / f'config/live/extruder{slot}.cfg').read_text()
+    section = re.search(
+        r'(?ms)^\[delayed_gcode delayed_pause%d\].*?(?=^\[|\Z)' % slot,
+        source).group()
+    command = next(line.strip() for line in section.splitlines()
+                   if line.strip().startswith('RESPOND '))
+    assert shlex.split(command.split(';', 1)[0]) == [
+        'RESPOND', 'MSG=Runout delay finished, pausing now']
+    commands = [line.strip() for line in section.split('gcode:', 1)[1].splitlines()
+                if line.strip() and not line.lstrip().startswith('#')]
+    assert commands == [command, 'PAUSE']
+
+
 def test_unload_temperature_message_survives_gcode_comment_parsing():
     model = HeaterModel(ROOT / 'config/live')
     model.p['configfile']['settings']['extruder3'] = {'max_temp': 350}
@@ -274,14 +289,28 @@ def test_vendor_resume_clears_native_pause_state_before_sd_resume():
     assert commands.index('CLEAR_PAUSE') < commands.index('M24')
 
 
+def render_print_finish(model, macro, bed_drop=50.):
+    model.p['gcode_macro PRINT_END'] = {'bed_drop': bed_drop}
+    model.p['save_variables']['variables']['current_extruder'] = 0
+    script = model.templates[macro].render(printer=model.p, params={})
+    helper = '_WMP_PRINT_END_CLEARANCE_AND_WIPE'
+    assert script.count(helper) == 1
+    assert script.index(helper) < script.index('BED_MESH_CLEAR')
+    assert script.index(helper) < script.index('M84')
+    return script.replace(helper, model.templates[helper].render(
+        printer=model.p, params={}))
+
+
+@pytest.mark.parametrize('macro', ['PRINT_END', 'CANCEL_PRINT'])
 @pytest.mark.parametrize('physical_z,gcode_z,expected_target', [
     (20., 19.7, 69.7),
     (275., 274.7, 299.7),
     (300., 299.7, None),
     (304., 303.7, None),
+    (275., 280., 305.),
 ])
 def test_print_end_bed_drop_is_clamped_to_bottom_endstop(
-        physical_z, gcode_z, expected_target):
+        macro, physical_z, gcode_z, expected_target):
     m = HeaterModel(ROOT / 'config/live')
     m.p['configfile']['settings'].update({
         'printer': {'max_velocity': 600, 'max_accel': 10000},
@@ -295,8 +324,7 @@ def test_print_end_bed_drop_is_clamped_to_bottom_endstop(
         'gcode_position': {'z': gcode_z},
         'position': {'z': physical_z},
     }
-    script = m.templates['PRINT_END'].render(
-        printer=m.p, params={}, bed_drop=50.)
+    script = render_print_finish(m, macro)
     z_moves = [line.strip() for line in script.splitlines()
                if re.match(r'\s*G1 Z', line)]
     if expected_target is None:
@@ -306,19 +334,36 @@ def test_print_end_bed_drop_is_clamped_to_bottom_endstop(
     assert 'WIPE_NOZZLE' in script
 
 
-def test_print_end_skips_wipe_without_all_axes_homed():
+@pytest.mark.parametrize('macro', ['PRINT_END', 'CANCEL_PRINT'])
+@pytest.mark.parametrize('homed', ['', 'xy', 'z'])
+def test_print_end_skips_wipe_without_all_axes_homed(macro, homed):
     m = HeaterModel(ROOT / 'config/live')
     m.p['configfile']['settings'].update({
         'printer': {'max_velocity': 600, 'max_accel': 10000},
         'stepper_z': {'position_endstop': 300},
     })
-    m.p['toolhead'].update({'homed_axes': 'z', 'position': {'z': 20.}})
+    m.p['toolhead'].update({'homed_axes': homed, 'position': {'z': 20.}})
     m.p['gcode_move'] = {
         'gcode_position': {'z': 20.}, 'position': {'z': 20.}}
-    script = m.templates['PRINT_END'].render(
-        printer=m.p, params={}, bed_drop=50.)
-    assert 'G1 Z70.0 F3000' in script
+    script = render_print_finish(m, macro)
+    assert ('G1 Z70.0 F3000' in script) == ('z' in homed)
     assert 'WIPE_NOZZLE' not in script
+
+
+@pytest.mark.parametrize('macro', ['PRINT_END', 'CANCEL_PRINT'])
+@pytest.mark.parametrize('bed_drop,expected_target', [(12.5, 32.5), (0, None), (-5, None)])
+def test_print_finish_respects_existing_bed_drop_setting(macro, bed_drop, expected_target):
+    m = HeaterModel(ROOT / 'config/live')
+    m.p['configfile']['settings'].update({
+        'printer': {'max_velocity': 600, 'max_accel': 10000},
+        'stepper_z': {'position_endstop': 300},
+    })
+    m.p['toolhead'].update({'homed_axes': 'xyz', 'position': {'z': 20.}})
+    m.p['gcode_move']['gcode_position'] = {'z': 20.}
+    script = render_print_finish(m, macro, bed_drop)
+    z_moves = [line.strip() for line in script.splitlines()
+               if re.match(r'\s*G1 Z', line)]
+    assert z_moves == ([] if expected_target is None else [f'G1 Z{expected_target} F3000'])
 
 
 @pytest.mark.parametrize('material_class,armed_pull,earlier_pull', [
@@ -358,3 +403,24 @@ def test_tip_shaping_has_no_openace_hook_without_openace(material_class):
         cooling_speed_list=[300, 240, 150], stamp_len=35)
     assert '_OPENACE_ROLLBACK_ASSIST_ON' not in script
     assert '_OPENACE_ROLLBACK_ASSIST_OFF' not in script
+
+
+def test_print_end_reaches_sd_eof_and_finishes_cleanup_without_resetting_reader():
+    m = HeaterModel(ROOT / 'config/live')
+    m.p['configfile']['settings']['printer'] = {'max_velocity': 600, 'max_accel': 10000}
+    script = m.templates['PRINT_END'].render(printer=m.p, params={})
+    commands = [line.split('#', 1)[0].strip() for line in script.splitlines()]
+    restored = {}
+    for line in commands:
+        if not line:
+            continue
+        command = line.split()[0]
+        if command == 'SDCARD_RESET_FILE':
+            raise RuntimeError('SDCARD_RESET_FILE cannot be run from the sdcard')
+        if command == 'SAVE_VARIABLE':
+            fields = dict(token.split('=', 1) for token in shlex.split(line)[1:])
+            restored[fields['VARIABLE']] = int(fields['VALUE'])
+    assert {key: restored[key] for key in ('box_modify_t0', 'box_modify_t1',
+                                          'box_modify_t2', 'box_modify_t3', 'probe_tool')} == {
+        'box_modify_t0': 0, 'box_modify_t1': 1, 'box_modify_t2': 2, 'box_modify_t3': 3, 'probe_tool': 0}
+    assert commands.index('TURN_OFF_HEATERS') < commands.index('_WMP_CASE_LIGHT_PRINT_END')

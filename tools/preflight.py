@@ -177,7 +177,8 @@ def config(ctx):
                   writable_files=['/sys/class/gpio/gpio76/value']
                   if needs_light and 'preload' not in getattr(ctx, 'installing_components', set()) else [])
     # Parse with the printer's Python and Jinja, without loading modules or moving hardware.
-    remote(ctx, r'''import ast, jinja2, re
+    remote(ctx, r'''# -*- coding: utf-8 -*-
+import ast, jinja2, re
 for source in %r:
     ast.parse(source)
 env = jinja2.Environment('{%%', '%%}', '{', '}')

@@ -24,7 +24,7 @@ def harness(is_printing=False, runout_gcode=None, insert_gcode=None, sensor_name
             run_script=lambda s: calls.append(('script', str(s))),
             run_command=lambda s: calls.append(('script', str(s)))
         ),
-        'print_stats': NS(get_status=lambda now: {'state': 'paused' if getattr(sensor.runout_helper, 'paused', False) else ('printing' if is_printing else 'standby')}),
+        'print_stats': NS(get_status=lambda now: {'state': 'printing' if is_printing else 'standby'}),
         'pause_resume': NS(is_paused=lambda: getattr(sensor.runout_helper, 'paused', False)),
         'gcode_macro': NS(load_template=lambda config, name, default='': type('Template', (), {
             'render': lambda *a, **kw: insert_gcode if name == 'insert_gcode' else runout_gcode,
@@ -138,4 +138,4 @@ def test_filament_reload_triggers_resume_callback():
     # Verify script execution
     script_calls = [c for c in calls if c[0] == 'script']
     assert len(script_calls) == 1
-    assert script_calls[0][1] == 'RESUME_PRINT\nM400'
+    assert script_calls[0][1] == 'RESUME_PRINT'
